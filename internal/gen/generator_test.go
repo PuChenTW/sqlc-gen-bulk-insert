@@ -54,6 +54,36 @@ func TestParseOptions_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestParseOptions_SplitBy(t *testing.T) {
+	for _, valid := range []string{"single", "file", "query"} {
+		opts, err := parseOptions([]byte(`{"package":"db","split_by":"` + valid + `"}`))
+		if err != nil {
+			t.Errorf("split_by=%q: unexpected error: %v", valid, err)
+			continue
+		}
+		if opts.SplitBy != valid {
+			t.Errorf("split_by=%q: got %q", valid, opts.SplitBy)
+		}
+	}
+}
+
+func TestParseOptions_SplitByDefault(t *testing.T) {
+	opts, err := parseOptions([]byte(`{"package":"db"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.SplitBy != "single" {
+		t.Errorf("default SplitBy = %q, want %q", opts.SplitBy, "single")
+	}
+}
+
+func TestParseOptions_SplitByInvalid(t *testing.T) {
+	_, err := parseOptions([]byte(`{"package":"db","split_by":"per_table"}`))
+	if err == nil {
+		t.Error("expected error for unknown split_by, got nil")
+	}
+}
+
 // ─── isInsertQuery tests ──────────────────────────────────────────────────────
 
 func TestIsInsertQuery(t *testing.T) {
@@ -194,6 +224,52 @@ func TestBuildPlaceholder(t *testing.T) {
 		got := buildPlaceholder(tc.n)
 		if got != tc.want {
 			t.Errorf("buildPlaceholder(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// ─── toSnakeCase / filename helpers tests ─────────────────────────────────────
+
+func TestToSnakeCase(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"BulkInsertUser", "bulk_insert_user"},
+		{"BulkInsertProduct", "bulk_insert_product"},
+		{"BulkInsertID", "bulk_insert_id"},
+		{"BulkInsert", "bulk_insert"},
+	}
+	for _, tc := range tests {
+		got := toSnakeCase(tc.in)
+		if got != tc.want {
+			t.Errorf("toSnakeCase(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestSourceFileToOutName(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"users.sql", "bulk_users.go"},
+		{"product.sql", "bulk_product.go"},
+		{"queries/users.sql", "bulk_users.go"},
+		{"path/to/order_items.sql", "bulk_order_items.go"},
+		{"", "bulk_queries.go"},
+	}
+	for _, tc := range tests {
+		got := sourceFileToOutName(tc.in)
+		if got != tc.want {
+			t.Errorf("sourceFileToOutName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestQueryFuncToOutName(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"BulkInsertUser", "bulk_insert_user.go"},
+		{"BulkInsertProduct", "bulk_insert_product.go"},
+	}
+	for _, tc := range tests {
+		got := queryFuncToOutName(tc.in)
+		if got != tc.want {
+			t.Errorf("queryFuncToOutName(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -507,6 +583,142 @@ func TestGenerate_MissingPackageOption(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for missing package option, got nil")
 	}
+}
+
+// ─── split_by tests ───────────────────────────────────────────────────────────
+
+// makeQuery is a shorthand for building a two-param insert query with a source file.
+func makeQuery(name, filename string) *plugin.Query {
+	return &plugin.Query{
+		Name:            name,
+		Cmd:             ":exec",
+		Text:            "INSERT INTO t (a, b) VALUES (?, ?)",
+		Filename:        filename,
+		InsertIntoTable: &plugin.Identifier{Name: "t"},
+		Params: []*plugin.Parameter{
+			{Column: makeColumn("a", "varchar", true)},
+			{Column: makeColumn("b", "varchar", true)},
+		},
+	}
+}
+
+func TestGenerate_SplitByFile(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","split_by":"file"}`),
+		Queries: []*plugin.Query{
+			makeQuery("InsertUser", "users.sql"),
+			makeQuery("InsertProfile", "users.sql"),    // same source file
+			makeQuery("InsertProduct", "products.sql"), // different source file
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Files) != 2 {
+		t.Fatalf("expected 2 files, got %d: %v", len(resp.Files), fileNames(resp.Files))
+	}
+
+	byName := indexByName(resp.Files)
+
+	usersFile, ok := byName["bulk_users.go"]
+	if !ok {
+		t.Fatalf("missing bulk_users.go; got %v", fileNames(resp.Files))
+	}
+	assertContains(t, string(usersFile), "BulkInsertUser")
+	assertContains(t, string(usersFile), "BulkInsertProfile")
+	assertNotContains(t, string(usersFile), "BulkInsertProduct")
+
+	productsFile, ok := byName["bulk_products.go"]
+	if !ok {
+		t.Fatalf("missing bulk_products.go; got %v", fileNames(resp.Files))
+	}
+	assertContains(t, string(productsFile), "BulkInsertProduct")
+	assertNotContains(t, string(productsFile), "BulkInsertUser")
+}
+
+func TestGenerate_SplitByQuery(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","split_by":"query"}`),
+		Queries: []*plugin.Query{
+			makeQuery("InsertUser", "users.sql"),
+			makeQuery("InsertProduct", "products.sql"),
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Files) != 2 {
+		t.Fatalf("expected 2 files, got %d: %v", len(resp.Files), fileNames(resp.Files))
+	}
+
+	byName := indexByName(resp.Files)
+
+	userFile, ok := byName["bulk_insert_user.go"]
+	if !ok {
+		t.Fatalf("missing bulk_insert_user.go; got %v", fileNames(resp.Files))
+	}
+	assertContains(t, string(userFile), "BulkInsertUser")
+	assertNotContains(t, string(userFile), "BulkInsertProduct")
+
+	productFile, ok := byName["bulk_insert_product.go"]
+	if !ok {
+		t.Fatalf("missing bulk_insert_product.go; got %v", fileNames(resp.Files))
+	}
+	assertContains(t, string(productFile), "BulkInsertProduct")
+	assertNotContains(t, string(productFile), "BulkInsertUser")
+}
+
+func TestGenerate_SplitBySingleExplicit(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","split_by":"single","out_filename":"all_bulk.go"}`),
+		Queries: []*plugin.Query{
+			makeQuery("InsertUser", "users.sql"),
+			makeQuery("InsertProduct", "products.sql"),
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(resp.Files))
+	}
+	if resp.Files[0].Name != "all_bulk.go" {
+		t.Errorf("filename = %q, want %q", resp.Files[0].Name, "all_bulk.go")
+	}
+	content := string(resp.Files[0].Contents)
+	assertContains(t, content, "BulkInsertUser")
+	assertContains(t, content, "BulkInsertProduct")
+}
+
+func TestGenerate_SplitByInvalidOption(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","split_by":"table"}`),
+	}
+	_, err := Generate(context.Background(), req)
+	if err == nil {
+		t.Error("expected error for unknown split_by, got nil")
+	}
+}
+
+// ─── helpers for split tests ──────────────────────────────────────────────────
+
+func fileNames(files []*plugin.File) []string {
+	names := make([]string, len(files))
+	for i, f := range files {
+		names[i] = f.Name
+	}
+	return names
+}
+
+func indexByName(files []*plugin.File) map[string][]byte {
+	m := make(map[string][]byte, len(files))
+	for _, f := range files {
+		m[f.Name] = f.Contents
+	}
+	return m
 }
 
 // ─── Type-map tests ───────────────────────────────────────────────────────────
