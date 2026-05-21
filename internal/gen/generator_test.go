@@ -436,6 +436,45 @@ func TestGenerate_SQLNullImport(t *testing.T) {
 	assertContains(t, content, "[]sql.NullString")
 }
 
+// TestGenerate_MultiParamNoSpuriousImports verifies that a multi-param query
+// whose columns include datetime/json/nullable types does NOT cause "time",
+// "encoding/json", or "database/sql" to appear in the generated file.
+// Those types live inside the sqlc-generated params struct, not in our file.
+func TestGenerate_MultiParamNoSpuriousImports(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db"}`),
+		Queries: []*plugin.Query{
+			{
+				Name: "InsertEvent",
+				Cmd:  ":exec",
+				Text: "INSERT INTO events (name, started_at, metadata, count) VALUES (?, ?, ?, ?)",
+				InsertIntoTable: &plugin.Identifier{Name: "events"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("name", "varchar", true)},
+					{Column: makeColumn("started_at", "datetime", true)},  // time.Time
+					{Column: makeColumn("metadata", "json", true)},        // json.RawMessage
+					{Column: makeColumn("count", "int", false)},           // sql.NullInt32
+				},
+			},
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content := string(resp.Files[0].Contents)
+
+	// The params struct (InsertEventParams) is defined by sqlc's codegen, not ours.
+	// Our file must NOT import packages that are only needed inside that struct.
+	assertNotContains(t, content, `"time"`)
+	assertNotContains(t, content, `"encoding/json"`)
+	assertNotContains(t, content, `"database/sql"`)
+
+	// Sanity: the function and struct reference are still present.
+	assertContains(t, content, "BulkInsertEvent")
+	assertContains(t, content, "[]InsertEventParams")
+}
+
 func TestGenerate_CustomFilename(t *testing.T) {
 	req := &plugin.GenerateRequest{
 		PluginOptions: []byte(`{"package":"db","out_filename":"custom_bulk.go"}`),
@@ -537,5 +576,12 @@ func assertContains(t *testing.T, content, substr string) {
 	t.Helper()
 	if !strings.Contains(content, substr) {
 		t.Errorf("generated code does not contain %q\n\n--- Generated ---\n%s", substr, content)
+	}
+}
+
+func assertNotContains(t *testing.T, content, substr string) {
+	t.Helper()
+	if strings.Contains(content, substr) {
+		t.Errorf("generated code must not contain %q\n\n--- Generated ---\n%s", substr, content)
 	}
 }

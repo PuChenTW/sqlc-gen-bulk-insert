@@ -230,20 +230,12 @@ func buildBulkFunc(q *plugin.Query) (BulkFunc, error) {
 	} else {
 		// Multi-parameter query: reference the QueryNameParams struct that
 		// sqlc's main codegen emits (same output package).
+		// The individual column Go types do NOT appear in our generated file
+		// (they live inside the params struct), so no extra imports are needed.
 		paramsType = q.Name + "Params"
 		for _, p := range q.Params {
-			col := p.Column
-			fieldName := toPascalCase(col.Name)
+			fieldName := toPascalCase(p.Column.Name)
 			valueArgExprs = append(valueArgExprs, "arg."+fieldName)
-			_, hint := goType(col)
-			switch hint {
-			case "time":
-				needsTime = true
-			case "encoding/json":
-				needsJSON = true
-			case "database/sql":
-				needsSQL = true
-			}
 		}
 	}
 
