@@ -46,7 +46,10 @@ func parseOptions(data []byte) (*Options, error) {
 	if opts.Package == "" {
 		return nil, fmt.Errorf("sqlc-gen-bulk-insert: plugin option \"package\" is required")
 	}
-	if !token.IsIdentifier(opts.Package) {
+	// token.IsIdentifier rejects keywords and non-identifiers.
+	// The blank identifier "_" also passes IsIdentifier but is not a valid
+	// package name per the Go spec ("must not be the blank identifier").
+	if !token.IsIdentifier(opts.Package) || opts.Package == "_" {
 		return nil, fmt.Errorf(
 			"sqlc-gen-bulk-insert: plugin option \"package\" %q is not a valid Go identifier",
 			opts.Package,
@@ -55,7 +58,9 @@ func parseOptions(data []byte) (*Options, error) {
 	if opts.OutFilename == "" {
 		opts.OutFilename = "bulk_insert.go"
 	}
-	if filepath.Base(opts.OutFilename) != opts.OutFilename {
+	// Reject directory components and the special "." name.
+	base := filepath.Base(opts.OutFilename)
+	if base != opts.OutFilename || base == "." {
 		return nil, fmt.Errorf(
 			"sqlc-gen-bulk-insert: out_filename %q must be a plain filename, not a path",
 			opts.OutFilename,

@@ -2,6 +2,7 @@ package gen
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -49,11 +50,19 @@ func TestParseOptions_InvalidPackage(t *testing.T) {
 		{"space", "my package"},
 		{"digit start", "1package"},
 		{"dot", "my.pkg"},
+		{"blank identifier", "_"}, // Go spec: package name must not be the blank identifier
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := []byte(`{"package":"` + tc.pkg + `"}`)
-			_, err := parseOptions(raw)
+			// Use json.Marshal so test cases with special chars produce valid JSON.
+			type input struct {
+				Package string `json:"package"`
+			}
+			raw, err := json.Marshal(input{Package: tc.pkg})
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			_, err = parseOptions(raw)
 			if err == nil {
 				t.Errorf("expected error for package %q, got nil", tc.pkg)
 			}
@@ -67,10 +76,19 @@ func TestParseOptions_PathTraversalFilename(t *testing.T) {
 		"../../etc/evil.go",
 		"/etc/evil.go",
 		"subdir/evil.go",
+		".", // "." is not a plain filename
 	}
 	for _, name := range badNames {
-		raw := []byte(`{"package":"db","out_filename":"` + name + `"}`)
-		_, err := parseOptions(raw)
+		// Use json.Marshal so filenames with special chars produce valid JSON.
+		type input struct {
+			Package     string `json:"package"`
+			OutFilename string `json:"out_filename"`
+		}
+		raw, err := json.Marshal(input{Package: "db", OutFilename: name})
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		_, err = parseOptions(raw)
 		if err == nil {
 			t.Errorf("expected error for out_filename %q, got nil", name)
 		}
@@ -622,10 +640,8 @@ func TestGenerate_MissingPackageOption(t *testing.T) {
 	}
 }
 
-// TestGenerate_BacktickIdentifiers verifies that SQL queries using MySQL-style
-// backtick-quoted identifiers produce valid, compilable Go code. This was
-// previously broken because the SQL prefix was embedded in a Go raw-string
-// literal, which backtick characters would prematurely close.
+// TestGenerate_BacktickIdentifiers verifies that MySQL-style backtick-quoted
+// identifiers in SQL survive round-tripping into a valid Go constant.
 func TestGenerate_BacktickIdentifiers(t *testing.T) {
 	req := &plugin.GenerateRequest{
 		PluginOptions: []byte(`{"package":"db"}`),
@@ -839,14 +855,19 @@ func TestGoType_BasicTypes(t *testing.T) {
 		{makeColumn("c", "blob", true), "[]byte", ""},
 		{makeColumn("c", "blob", false), "[]byte", ""},
 		{makeColumn("c", "unknown_type", true), "any", ""},
+		{nil, "any", ""}, // nil column must not panic; falls back to "any"
 	}
 	for _, tc := range tests {
+		colName := "<nil>"
+		if tc.col != nil {
+			colName = tc.col.Type.Name
+		}
 		gotType, gotImport := goType(tc.col)
 		if gotType != tc.wantType {
-			t.Errorf("goType(%q) type = %q, want %q", tc.col.Type.Name, gotType, tc.wantType)
+			t.Errorf("goType(%q) type = %q, want %q", colName, gotType, tc.wantType)
 		}
 		if gotImport != tc.wantImport {
-			t.Errorf("goType(%q) import = %q, want %q", tc.col.Type.Name, gotImport, tc.wantImport)
+			t.Errorf("goType(%q) import = %q, want %q", colName, gotImport, tc.wantImport)
 		}
 	}
 }
