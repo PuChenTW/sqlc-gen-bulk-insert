@@ -17,7 +17,8 @@ the generated helper builds a single batched statement:
 INSERT INTO users (name, email) VALUES (?, ?), (?, ?), (?, ?)
 ```
 
-This is significantly faster for large data sets and avoids round-trip overhead.
+This is significantly faster for large data sets and avoids N round-trip
+overhead.
 
 ---
 
@@ -25,7 +26,7 @@ This is significantly faster for large data sets and avoids round-trip overhead.
 
 | Dependency | Version |
 |---|---|
-| Go  | ≥ 1.21 |
+| Go | ≥ 1.21 |
 | sqlc | ≥ 1.24 (tested with 1.30.0) |
 | MySQL / MariaDB | any version supporting multi-row `INSERT … VALUES` |
 
@@ -45,8 +46,8 @@ The `sqlc-gen-bulk-insert` binary must be on your `$PATH` when you run
 ## Configuration
 
 Add the plugin to your `sqlc.yaml` and point the `codegen` output at the
-**same directory** as your regular Go code-gen output so both share the
-same package:
+**same directory** as your regular Go code-gen output so both share the same
+package:
 
 ```yaml
 version: "2"
@@ -68,18 +69,53 @@ sql:
 
     codegen:
       - plugin:  sqlc-gen-bulk-insert
-        out:     "db"            # same output dir as gen.go
+        out:     "db"       # same output dir as gen.go
         options:
-          package:      "db"    # must match gen.go.package
-          out_filename: "bulk_insert.go"   # optional, default: bulk_insert.go
+          package: "db"     # must match gen.go.package
 ```
 
 ### Plugin options
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `package` | string | **required** | Go package name for the generated file |
-| `out_filename` | string | `bulk_insert.go` | File name written to the output directory |
+| `package` | string | **required** | Go package name for the generated file(s) |
+| `out_filename` | string | `bulk_insert.go` | Output file name — only used when `split_by` is `"single"` |
+| `split_by` | string | `"single"` | Controls how many files are produced (see below) |
+
+### `split_by` modes
+
+| Value | Output | File naming |
+|---|---|---|
+| `"single"` *(default)* | One file for all bulk functions | `out_filename` (`bulk_insert.go`) |
+| `"file"` | One file per source `.sql` file | `bulk_<sqlfile>.go` |
+| `"query"` | One file per generated function | `bulk_<function_snake>.go` |
+
+**`"file"` example** — queries from `users.sql` and `products.sql` produce:
+
+```
+db/
+├── bulk_users.go
+└── bulk_products.go
+```
+
+**`"query"` example** — `InsertUser` and `InsertProduct` produce:
+
+```
+db/
+├── bulk_insert_user.go
+└── bulk_insert_product.go
+```
+
+Full `sqlc.yaml` example using `split_by: "file"`:
+
+```yaml
+codegen:
+  - plugin:  sqlc-gen-bulk-insert
+    out:     "db"
+    options:
+      package:  "db"
+      split_by: "file"
+```
 
 ---
 
@@ -90,16 +126,15 @@ The plugin generates a `Bulk<QueryName>` function for every query that satisfies
 
 1. It is an `INSERT` statement (sqlc sets `InsertIntoTable` internally).
 2. Its command annotation is `:exec`, `:execresult`, or `:execrows`.
-3. It has at least one parameter (`?` placeholder).
+3. It has at least one `?` parameter.
 
-SELECT, UPDATE, DELETE queries and INSERT queries without parameters are silently
-skipped.
+SELECT, UPDATE, DELETE queries and parameter-less INSERTs are silently skipped.
 
 ---
 
 ## Generated code
 
-Given the query:
+### Multi-parameter query
 
 ```sql
 -- name: InsertUser :exec
@@ -139,8 +174,10 @@ func (q *Queries) BulkInsertUser(ctx context.Context, args []InsertUserParams) e
 }
 ```
 
-For queries with **exactly one** parameter, the function takes a `[]<GoType>`
-slice instead of a `[]<QueryName>Params` struct slice:
+### Single-parameter query
+
+For queries with exactly one parameter, the function takes a `[]<GoType>` slice
+instead of a `[]<QueryName>Params` struct slice:
 
 ```sql
 -- name: InsertAuditLog :exec
@@ -159,7 +196,7 @@ func (q *Queries) BulkInsertAuditLog(ctx context.Context, args []int64) error { 
 |---|---|---|
 | `tinyint(1)` / `bool` / `boolean` | `bool` | `sql.NullBool` |
 | `tinyint` | `int8` | `sql.NullInt16` |
-| `smallint` | `int16` | `sql.NullInt16` |
+| `smallint` / `year` | `int16` | `sql.NullInt16` |
 | `mediumint` / `int` / `integer` | `int32` | `sql.NullInt32` |
 | `bigint` | `int64` | `sql.NullInt64` |
 | `float` | `float32` | `sql.NullFloat64` |
@@ -171,17 +208,26 @@ func (q *Queries) BulkInsertAuditLog(ctx context.Context, args []int64) error { 
 | `json` | `json.RawMessage` | `json.RawMessage` |
 | unsigned modifier | `u`-prefixed type (e.g. `uint64`) | — |
 
+> **Note for multi-parameter queries:** the column types above appear inside the
+> sqlc-generated `<QueryName>Params` struct, not in the bulk file itself. Extra
+> imports (`time`, `encoding/json`, `database/sql`) are only added when a
+> single-parameter query uses one of those types directly in the function
+> signature.
+
 ---
 
 ## Caveats
 
-* The plugin only supports `?` positional placeholders (MySQL/MariaDB style).
-  It is not suitable for PostgreSQL (`$1`, `$2`, …) or named parameters.
-* The generated functions call `q.db.ExecContext` directly, which requires that
-  your `Queries` struct uses the standard `db DBTX` field emitted by
-  `sqlc-gen-go`.  Custom db-layer wrappers may need adaptation.
-* Very large batch sizes can exceed MySQL's `max_allowed_packet`.  Consider
-  chunking on the caller side when inserting thousands of rows.
+* **MySQL / MariaDB only.** The plugin uses `?` positional placeholders. It is
+  not suitable for PostgreSQL (`$1`, `$2`, …) or named parameters.
+* **`q.db` field.** The generated functions call `q.db.ExecContext` directly,
+  which requires that your `Queries` struct exposes the standard unexported `db`
+  field emitted by `sqlc-gen-go`. Custom db-layer wrappers may need adaptation.
+* **`max_allowed_packet`.** Very large batch sizes can exceed MySQL's packet
+  limit. Consider chunking on the caller side when inserting thousands of rows.
+* **No `Querier` interface update.** The bulk functions are not added to sqlc's
+  generated `Querier` interface. Add your own `BulkQuerier` interface in a
+  hand-written file if you need one.
 
 ---
 
@@ -190,9 +236,32 @@ func (q *Queries) BulkInsertAuditLog(ctx context.Context, args []int64) error { 
 ```bash
 git clone https://github.com/puchentw/sqlc-gen-bulk-insert
 cd sqlc-gen-bulk-insert
+
+# Run tests
 go test ./...
+
+# Build the plugin binary
 go build -o sqlc-gen-bulk-insert .
+
+# Try against the bundled example (requires sqlc on $PATH)
+cd example && sqlc generate
 ```
+
+---
+
+## Changelog
+
+### v0.0.1 — initial release
+
+* Generate `Bulk<QueryName>` functions for `INSERT` + `:exec` / `:execresult` /
+  `:execrows` queries.
+* Multi-parameter queries use the existing `<QueryName>Params` struct generated
+  by sqlc.
+* Single-parameter queries use the mapped Go type directly (`[]int64`,
+  `[]string`, …).
+* Full MySQL / MariaDB type → Go type mapping including unsigned variants and
+  nullable (`sql.NullXxx`) types.
+* `split_by` option: `"single"` (default), `"file"`, `"query"`.
 
 ---
 
