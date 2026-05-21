@@ -78,7 +78,11 @@ sqlc stdin (protobuf GenerateRequest)
 
 **`Options`** (`options.go`):
 - `Package` (required) — Go package name for the generated file
-- `OutFilename` (default: `bulk_insert.go`)
+- `OutFilename` (default: `bulk_insert.go`) — used only when `SplitBy` is `"single"`
+- `SplitBy` (default: `"single"`) — controls output file count:
+  - `"single"` — one file (`out_filename`)
+  - `"file"` — one file per source `.sql` file (`bulk_<sqlfile>.go`)
+  - `"query"` — one file per generated function (`bulk_insert_user.go`)
 
 ### Query selection rules
 

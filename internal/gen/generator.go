@@ -36,6 +36,9 @@ type BulkFunc struct {
 	//   "arg.Name, arg.Email"  (multi-param)
 	//   "arg"                   (single-param)
 	ValueArgsLine string
+	// SourceFile is the SQL filename this query originated from, e.g. "users.sql".
+	// Used by the "file" split mode to group functions into per-source files.
+	SourceFile string
 	// NeedsTime / NeedsJSON / NeedsSQL indicate extra imports required by
 	// the types used in this function.
 	NeedsTime bool
@@ -102,8 +105,8 @@ func (q *Queries) {{.FuncName}}(ctx context.Context, args []{{.ParamsType}}) err
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 // Generate is the codegen.Handler called by codegen.Run.
-// It filters the incoming queries, builds BulkFunc descriptors, renders the
-// template, formats the output with go/format, and returns a single file.
+// It filters the incoming queries, builds BulkFunc descriptors, then delegates
+// to the appropriate file-rendering strategy based on opts.SplitBy.
 func Generate(_ context.Context, req *plugin.GenerateRequest) (*plugin.GenerateResponse, error) {
 	opts, err := parseOptions(req.PluginOptions)
 	if err != nil {
@@ -130,11 +133,84 @@ func Generate(_ context.Context, req *plugin.GenerateRequest) (*plugin.GenerateR
 		return &plugin.GenerateResponse{}, nil
 	}
 
-	data := fileData{
-		Package: opts.Package,
-		Funcs:   funcs,
+	files, err := renderFiles(opts, funcs)
+	if err != nil {
+		return nil, err
 	}
-	// Aggregate import requirements from all functions into the file level.
+	return &plugin.GenerateResponse{Files: files}, nil
+}
+
+// ─── File rendering ───────────────────────────────────────────────────────────
+
+// renderFiles dispatches to the correct splitting strategy.
+func renderFiles(opts *Options, funcs []BulkFunc) ([]*plugin.File, error) {
+	switch opts.SplitBy {
+	case "file":
+		return renderBySourceFile(opts.Package, funcs)
+	case "query":
+		return renderByQuery(opts.Package, funcs)
+	default: // "single"
+		contents, err := renderFile(opts.Package, funcs)
+		if err != nil {
+			return nil, err
+		}
+		return []*plugin.File{{Name: opts.OutFilename, Contents: contents}}, nil
+	}
+}
+
+// renderBySourceFile groups BulkFuncs by the SQL file they originated from and
+// produces one output file per group.
+//
+//	users.sql    → bulk_users.go
+//	products.sql → bulk_products.go
+func renderBySourceFile(pkg string, funcs []BulkFunc) ([]*plugin.File, error) {
+	// Preserve insertion order of source files seen.
+	order := make([]string, 0)
+	groups := make(map[string][]BulkFunc)
+	for _, f := range funcs {
+		if _, seen := groups[f.SourceFile]; !seen {
+			order = append(order, f.SourceFile)
+		}
+		groups[f.SourceFile] = append(groups[f.SourceFile], f)
+	}
+
+	files := make([]*plugin.File, 0, len(groups))
+	for _, src := range order {
+		contents, err := renderFile(pkg, groups[src])
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, &plugin.File{
+			Name:     sourceFileToOutName(src),
+			Contents: contents,
+		})
+	}
+	return files, nil
+}
+
+// renderByQuery produces one output file per BulkFunc.
+//
+//	BulkInsertUser    → bulk_insert_user.go
+//	BulkInsertProduct → bulk_insert_product.go
+func renderByQuery(pkg string, funcs []BulkFunc) ([]*plugin.File, error) {
+	files := make([]*plugin.File, 0, len(funcs))
+	for _, f := range funcs {
+		contents, err := renderFile(pkg, []BulkFunc{f})
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, &plugin.File{
+			Name:     queryFuncToOutName(f.FuncName),
+			Contents: contents,
+		})
+	}
+	return files, nil
+}
+
+// renderFile renders the Go template for a slice of BulkFuncs and returns
+// gofmt-formatted source bytes.
+func renderFile(pkg string, funcs []BulkFunc) ([]byte, error) {
+	data := fileData{Package: pkg, Funcs: funcs}
 	for _, f := range funcs {
 		if f.NeedsTime {
 			data.NeedsTime = true
@@ -147,7 +223,6 @@ func Generate(_ context.Context, req *plugin.GenerateRequest) (*plugin.GenerateR
 		}
 	}
 
-	// Render the template.
 	tmpl, err := template.New("bulk").Parse(bulkInsertTmpl)
 	if err != nil {
 		return nil, fmt.Errorf("sqlc-gen-bulk-insert: parsing template: %w", err)
@@ -157,21 +232,14 @@ func Generate(_ context.Context, req *plugin.GenerateRequest) (*plugin.GenerateR
 		return nil, fmt.Errorf("sqlc-gen-bulk-insert: executing template: %w", err)
 	}
 
-	// Format with gofmt.
 	formatted, err := format.Source(buf.Bytes())
 	if err != nil {
-		// Include the raw output so the caller can debug template issues.
 		return nil, fmt.Errorf(
 			"sqlc-gen-bulk-insert: formatting generated source: %w\n---\n%s",
 			err, buf.String(),
 		)
 	}
-
-	return &plugin.GenerateResponse{
-		Files: []*plugin.File{
-			{Name: opts.OutFilename, Contents: formatted},
-		},
-	}, nil
+	return formatted, nil
 }
 
 // ─── Query filtering ──────────────────────────────────────────────────────────
@@ -230,20 +298,12 @@ func buildBulkFunc(q *plugin.Query) (BulkFunc, error) {
 	} else {
 		// Multi-parameter query: reference the QueryNameParams struct that
 		// sqlc's main codegen emits (same output package).
+		// The individual column Go types do NOT appear in our generated file
+		// (they live inside the params struct), so no extra imports are needed.
 		paramsType = q.Name + "Params"
 		for _, p := range q.Params {
-			col := p.Column
-			fieldName := toPascalCase(col.Name)
+			fieldName := toPascalCase(p.Column.Name)
 			valueArgExprs = append(valueArgExprs, "arg."+fieldName)
-			_, hint := goType(col)
-			switch hint {
-			case "time":
-				needsTime = true
-			case "encoding/json":
-				needsJSON = true
-			case "database/sql":
-				needsSQL = true
-			}
 		}
 	}
 
@@ -255,6 +315,7 @@ func buildBulkFunc(q *plugin.Query) (BulkFunc, error) {
 		Placeholder:   placeholder,
 		NumParams:     n,
 		ValueArgsLine: strings.Join(valueArgExprs, ", "),
+		SourceFile:    q.Filename,
 		NeedsTime:     needsTime,
 		NeedsJSON:     needsJSON,
 		NeedsSQL:      needsSQL,

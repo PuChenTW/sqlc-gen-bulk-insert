@@ -95,3 +95,65 @@ func buildPlaceholder(n int) string {
 func escapeDoubleQuotes(s string) string {
 	return strings.ReplaceAll(s, `"`, `\"`)
 }
+
+// toSnakeCase converts a PascalCase or camelCase identifier to snake_case.
+//
+//	"BulkInsertUser"  → "bulk_insert_user"
+//	"BulkInsertID"    → "bulk_insert_id"
+func toSnakeCase(s string) string {
+	var out strings.Builder
+	runes := []rune(s)
+	for i, r := range runes {
+		if unicode.IsUpper(r) {
+			// Insert underscore before an uppercase letter when it is:
+			//   • not the first character, AND
+			//   • either preceded by a lowercase letter, OR
+			//     followed by a lowercase letter (handles "ID" → "id" not "i_d")
+			if i > 0 {
+				prev := runes[i-1]
+				next := rune(0)
+				if i+1 < len(runes) {
+					next = runes[i+1]
+				}
+				if unicode.IsLower(prev) || (unicode.IsLower(next) && unicode.IsUpper(prev)) {
+					out.WriteByte('_')
+				}
+			}
+			out.WriteRune(unicode.ToLower(r))
+		} else {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+// sourceFileToOutName derives an output filename from the source SQL filename.
+//
+//	"queries/users.sql"  → "bulk_users.go"
+//	"product.sql"        → "bulk_product.go"
+//
+// The directory component and all extensions are stripped; "bulk_" is prepended
+// and ".go" is appended.
+func sourceFileToOutName(sqlFile string) string {
+	// Strip directory.
+	base := sqlFile
+	if idx := strings.LastIndexAny(base, "/\\"); idx >= 0 {
+		base = base[idx+1:]
+	}
+	// Strip all extensions (e.g. "users.sql" → "users").
+	if dot := strings.Index(base, "."); dot >= 0 {
+		base = base[:dot]
+	}
+	if base == "" {
+		base = "queries"
+	}
+	return "bulk_" + base + ".go"
+}
+
+// queryFuncToOutName derives an output filename from a generated function name.
+//
+//	"BulkInsertUser"     → "bulk_insert_user.go"
+//	"BulkInsertProduct"  → "bulk_insert_product.go"
+func queryFuncToOutName(funcName string) string {
+	return toSnakeCase(funcName) + ".go"
+}
