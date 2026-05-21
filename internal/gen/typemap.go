@@ -16,6 +16,9 @@ import (
 // The mapping follows sqlc-gen-go's mysql_type.go conventions so that the
 // types emitted by this plugin are consistent with sqlc's own output.
 func goType(col *plugin.Column) (typeName string, importHint string) {
+	if col == nil {
+		return "any", ""
+	}
 	columnType := sdk.DataType(col.Type)
 	notNull := col.NotNull
 	unsigned := col.Unsigned
@@ -87,6 +90,8 @@ func goType(col *plugin.Column) (typeName string, importHint string) {
 		if notNull {
 			return "float32", ""
 		}
+		// sql.NullFloat32 does not exist in database/sql; NullFloat64 is used
+		// instead. The widening from float32 to float64 is safe and lossless.
 		return "sql.NullFloat64", "database/sql"
 
 	case "double", "double precision", "real":

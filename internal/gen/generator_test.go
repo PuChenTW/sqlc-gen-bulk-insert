@@ -40,6 +40,43 @@ func TestParseOptions_MissingPackage(t *testing.T) {
 	}
 }
 
+func TestParseOptions_InvalidPackage(t *testing.T) {
+	tests := []struct {
+		name string
+		pkg  string
+	}{
+		{"hyphen", "my-package"},
+		{"space", "my package"},
+		{"digit start", "1package"},
+		{"dot", "my.pkg"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"package":"` + tc.pkg + `"}`)
+			_, err := parseOptions(raw)
+			if err == nil {
+				t.Errorf("expected error for package %q, got nil", tc.pkg)
+			}
+		})
+	}
+}
+
+func TestParseOptions_PathTraversalFilename(t *testing.T) {
+	badNames := []string{
+		"../evil.go",
+		"../../etc/evil.go",
+		"/etc/evil.go",
+		"subdir/evil.go",
+	}
+	for _, name := range badNames {
+		raw := []byte(`{"package":"db","out_filename":"` + name + `"}`)
+		_, err := parseOptions(raw)
+		if err == nil {
+			t.Errorf("expected error for out_filename %q, got nil", name)
+		}
+	}
+}
+
 func TestParseOptions_EmptyBytes(t *testing.T) {
 	_, err := parseOptions(nil)
 	if err == nil {
@@ -585,6 +622,67 @@ func TestGenerate_MissingPackageOption(t *testing.T) {
 	}
 }
 
+// TestGenerate_BacktickIdentifiers verifies that SQL queries using MySQL-style
+// backtick-quoted identifiers produce valid, compilable Go code. This was
+// previously broken because the SQL prefix was embedded in a Go raw-string
+// literal, which backtick characters would prematurely close.
+func TestGenerate_BacktickIdentifiers(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db"}`),
+		Queries: []*plugin.Query{
+			{
+				Name:            "InsertUser",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO `users` (`name`, `email`) VALUES (?, ?)",
+				InsertIntoTable: &plugin.Identifier{Name: "users"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("name", "varchar", true)},
+					{Column: makeColumn("email", "varchar", true)},
+				},
+			},
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error with backtick identifiers: %v", err)
+	}
+	if len(resp.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(resp.Files))
+	}
+	content := string(resp.Files[0].Contents)
+	assertContains(t, content, "BulkInsertUser")
+	// The backtick-quoted SQL text must be preserved in the generated constant.
+	assertContains(t, content, "INSERT INTO `users`")
+	assertContains(t, content, "`name`")
+}
+
+func TestGenerate_SingleParamJSONImport(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db"}`),
+		Queries: []*plugin.Query{
+			{
+				Name:            "InsertPayload",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO payloads (data) VALUES (?)",
+				InsertIntoTable: &plugin.Identifier{Name: "payloads"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("data", "json", true)},
+				},
+			},
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(resp.Files))
+	}
+	content := string(resp.Files[0].Contents)
+	assertContains(t, content, `"encoding/json"`)
+	assertContains(t, content, "[]json.RawMessage")
+}
+
 // ─── split_by tests ───────────────────────────────────────────────────────────
 
 // makeQuery is a shorthand for building a two-param insert query with a source file.
@@ -779,6 +877,25 @@ func TestGoType_UnsignedBigint(t *testing.T) {
 	gotType, _ := goType(col)
 	if gotType != "uint64" {
 		t.Errorf("unsigned bigint type = %q, want %q", gotType, "uint64")
+	}
+}
+
+// TestGoType_NullableUnsignedTinyint verifies that a nullable tinyint column
+// maps to sql.NullInt16 regardless of the unsigned flag, since database/sql
+// provides no unsigned nullable integer types.
+func TestGoType_NullableUnsignedTinyint(t *testing.T) {
+	col := &plugin.Column{
+		Name:     "flags",
+		NotNull:  false,
+		Unsigned: true,
+		Type:     &plugin.Identifier{Name: "tinyint"},
+	}
+	gotType, gotImport := goType(col)
+	if gotType != "sql.NullInt16" {
+		t.Errorf("nullable unsigned tinyint type = %q, want sql.NullInt16", gotType)
+	}
+	if gotImport != "database/sql" {
+		t.Errorf("nullable unsigned tinyint import = %q, want database/sql", gotImport)
 	}
 }
 

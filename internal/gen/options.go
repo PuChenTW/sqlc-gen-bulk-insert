@@ -3,6 +3,8 @@ package gen
 import (
 	"encoding/json"
 	"fmt"
+	"go/token"
+	"path/filepath"
 )
 
 // Options holds the plugin-specific configuration parsed from the PluginOptions
@@ -44,8 +46,20 @@ func parseOptions(data []byte) (*Options, error) {
 	if opts.Package == "" {
 		return nil, fmt.Errorf("sqlc-gen-bulk-insert: plugin option \"package\" is required")
 	}
+	if !token.IsIdentifier(opts.Package) {
+		return nil, fmt.Errorf(
+			"sqlc-gen-bulk-insert: plugin option \"package\" %q is not a valid Go identifier",
+			opts.Package,
+		)
+	}
 	if opts.OutFilename == "" {
 		opts.OutFilename = "bulk_insert.go"
+	}
+	if filepath.Base(opts.OutFilename) != opts.OutFilename {
+		return nil, fmt.Errorf(
+			"sqlc-gen-bulk-insert: out_filename %q must be a plain filename, not a path",
+			opts.OutFilename,
+		)
 	}
 	switch opts.SplitBy {
 	case "", "single":

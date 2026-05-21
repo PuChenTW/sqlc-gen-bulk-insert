@@ -90,12 +90,6 @@ func buildPlaceholder(n int) string {
 	return "(" + strings.Join(marks, ", ") + ")"
 }
 
-// escapeDoubleQuotes escapes any literal double-quote characters in s so that
-// s can be safely embedded inside a Go double-quoted string literal.
-func escapeDoubleQuotes(s string) string {
-	return strings.ReplaceAll(s, `"`, `\"`)
-}
-
 // toSnakeCase converts a PascalCase or camelCase identifier to snake_case.
 //
 //	"BulkInsertUser"  → "bulk_insert_user"
