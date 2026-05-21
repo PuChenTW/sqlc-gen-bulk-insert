@@ -1,0 +1,23 @@
+version: "2"
+
+plugins:
+  - name: sqlc-gen-bulk-insert
+    process:
+      cmd: sqlc-gen-bulk-insert   # must be on $PATH or use an absolute path
+
+sql:
+  - engine: "mysql"
+    queries: "query.sql"
+    schema:  "schema.sql"
+
+    gen:
+      go:
+        package: "db"
+        out:     "db"
+
+    codegen:
+      - plugin:  sqlc-gen-bulk-insert
+        out:     "db"          # same directory so generated code shares the package
+        options:
+          package:      "db"
+          out_filename: "bulk_insert.go"
