@@ -703,6 +703,191 @@ func TestGenerate_SplitByInvalidOption(t *testing.T) {
 	}
 }
 
+// ─── emit_interface tests ─────────────────────────────────────────────────────
+
+func TestParseOptions_EmitInterfaceDefaults(t *testing.T) {
+	opts, err := parseOptions([]byte(`{"package":"db"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.EmitInterface {
+		t.Errorf("EmitInterface = true, want false by default")
+	}
+	if opts.InterfaceName != "BulkQuerier" {
+		t.Errorf("InterfaceName = %q, want %q", opts.InterfaceName, "BulkQuerier")
+	}
+}
+
+func TestGenerate_EmitInterface(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","emit_interface":true}`),
+		Queries: []*plugin.Query{
+			{
+				Name:            "InsertUser",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO users (name, email) VALUES (?, ?)",
+				InsertIntoTable: &plugin.Identifier{Name: "users"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("name", "varchar", true)},
+					{Column: makeColumn("email", "varchar", true)},
+				},
+			},
+			{
+				Name:            "InsertAuditLog",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO audit_log (user_id) VALUES (?)",
+				InsertIntoTable: &plugin.Identifier{Name: "audit_log"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("user_id", "bigint", true)},
+				},
+			},
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// One bulk file + one interface file.
+	if len(resp.Files) != 2 {
+		t.Fatalf("expected 2 files, got %d: %v", len(resp.Files), fileNames(resp.Files))
+	}
+
+	byName := indexByName(resp.Files)
+	iface, ok := byName["bulk_querier.go"]
+	if !ok {
+		t.Fatalf("missing bulk_querier.go; got %v", fileNames(resp.Files))
+	}
+	content := string(iface)
+	assertContains(t, content, "type BulkQuerier interface")
+	assertContains(t, content, "BulkInsertUser(ctx context.Context, args []InsertUserParams) error")
+	assertContains(t, content, "BulkInsertAuditLog(ctx context.Context, args []int64) error")
+}
+
+func TestGenerate_EmitInterfaceImports(t *testing.T) {
+	// Single-param queries put concrete types into the interface signature,
+	// so the interface file must import the corresponding packages.
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","emit_interface":true}`),
+		Queries: []*plugin.Query{
+			{
+				Name:            "InsertEvent",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO events (created_at) VALUES (?)",
+				InsertIntoTable: &plugin.Identifier{Name: "events"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("created_at", "datetime", true)}, // time.Time
+				},
+			},
+			{
+				Name:            "InsertItem",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO items (value) VALUES (?)",
+				InsertIntoTable: &plugin.Identifier{Name: "items"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("value", "varchar", false)}, // sql.NullString
+				},
+			},
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	iface := string(indexByName(resp.Files)["bulk_querier.go"])
+	assertContains(t, iface, `"time"`)
+	assertContains(t, iface, `"database/sql"`)
+	assertContains(t, iface, "args []time.Time")
+	assertContains(t, iface, "args []sql.NullString")
+}
+
+// Multi-param-only queries reference the Params struct, whose column types live
+// inside that struct (sqlc codegen), so the interface needs no extra imports.
+func TestGenerate_EmitInterfaceNoSpuriousImports(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","emit_interface":true}`),
+		Queries: []*plugin.Query{
+			{
+				Name:            "InsertEvent",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO events (name, started_at) VALUES (?, ?)",
+				InsertIntoTable: &plugin.Identifier{Name: "events"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("name", "varchar", true)},
+					{Column: makeColumn("started_at", "datetime", true)},
+				},
+			},
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	iface := string(indexByName(resp.Files)["bulk_querier.go"])
+	assertNotContains(t, iface, `"time"`)
+	assertNotContains(t, iface, `"encoding/json"`)
+	assertNotContains(t, iface, `"database/sql"`)
+	assertContains(t, iface, "args []InsertEventParams")
+}
+
+func TestGenerate_InterfaceCustomName(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","emit_interface":true,"interface_name":"BulkStore"}`),
+		Queries: []*plugin.Query{
+			makeQuery("InsertUser", "users.sql"),
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	iface, ok := indexByName(resp.Files)["bulk_store.go"]
+	if !ok {
+		t.Fatalf("missing bulk_store.go; got %v", fileNames(resp.Files))
+	}
+	assertContains(t, string(iface), "type BulkStore interface")
+}
+
+func TestGenerate_NoInterfaceWhenDisabled(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db"}`),
+		Queries: []*plugin.Query{
+			makeQuery("InsertUser", "users.sql"),
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := indexByName(resp.Files)["bulk_querier.go"]; ok {
+		t.Errorf("bulk_querier.go must not be emitted when emit_interface is off")
+	}
+}
+
+// The interface is emitted as one dedicated file regardless of split_by.
+func TestGenerate_InterfaceWithSplitByQuery(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","split_by":"query","emit_interface":true}`),
+		Queries: []*plugin.Query{
+			makeQuery("InsertUser", "users.sql"),
+			makeQuery("InsertProduct", "products.sql"),
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Two per-query files + one interface file.
+	if len(resp.Files) != 3 {
+		t.Fatalf("expected 3 files, got %d: %v", len(resp.Files), fileNames(resp.Files))
+	}
+	iface, ok := indexByName(resp.Files)["bulk_querier.go"]
+	if !ok {
+		t.Fatalf("missing bulk_querier.go; got %v", fileNames(resp.Files))
+	}
+	assertContains(t, string(iface), "BulkInsertUser")
+	assertContains(t, string(iface), "BulkInsertProduct")
+}
+
 // ─── helpers for split tests ──────────────────────────────────────────────────
 
 func fileNames(files []*plugin.File) []string {

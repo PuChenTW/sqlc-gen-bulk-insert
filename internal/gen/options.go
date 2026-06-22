@@ -26,6 +26,17 @@ type Options struct {
 	//   "query"            — one file per generated function.
 	//                        e.g. BulkInsertUser → bulk_insert_user.go
 	SplitBy string `json:"split_by"`
+
+	// EmitInterface controls whether a dedicated interface file declaring every
+	// generated bulk method is produced. Defaults to false.
+	// When true, the interface is always written to its own file
+	// (toSnakeCase(InterfaceName) + ".go") regardless of SplitBy, so that mock
+	// libraries (gomock/mockgen, mockery, …) can be run against it.
+	EmitInterface bool `json:"emit_interface"`
+
+	// InterfaceName is the name of the generated interface.
+	// Defaults to "BulkQuerier". Only used when EmitInterface is true.
+	InterfaceName string `json:"interface_name"`
 }
 
 // parseOptions deserialises JSON plugin options.
@@ -33,8 +44,9 @@ type Options struct {
 // absent / empty, or "split_by" is not a recognised value.
 func parseOptions(data []byte) (*Options, error) {
 	opts := &Options{
-		OutFilename: "bulk_insert.go",
-		SplitBy:     "single",
+		OutFilename:   "bulk_insert.go",
+		SplitBy:       "single",
+		InterfaceName: "BulkQuerier",
 	}
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, opts); err != nil {
@@ -46,6 +58,9 @@ func parseOptions(data []byte) (*Options, error) {
 	}
 	if opts.OutFilename == "" {
 		opts.OutFilename = "bulk_insert.go"
+	}
+	if opts.InterfaceName == "" {
+		opts.InterfaceName = "BulkQuerier"
 	}
 	switch opts.SplitBy {
 	case "", "single":
