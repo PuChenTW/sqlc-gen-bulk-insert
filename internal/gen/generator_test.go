@@ -888,6 +888,215 @@ func TestGenerate_InterfaceWithSplitByQuery(t *testing.T) {
 	assertContains(t, string(iface), "BulkInsertProduct")
 }
 
+// ─── emit_combined_interface tests ────────────────────────────────────────────
+
+func TestParseOptions_CombinedInterfaceDefaults(t *testing.T) {
+	opts, err := parseOptions([]byte(`{"package":"db"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.EmitCombinedInterface {
+		t.Errorf("EmitCombinedInterface = true, want false by default")
+	}
+	if opts.CombinedInterfaceName != "ExtQuerier" {
+		t.Errorf("CombinedInterfaceName = %q, want %q", opts.CombinedInterfaceName, "ExtQuerier")
+	}
+	if opts.BaseQuerierName != "Querier" {
+		t.Errorf("BaseQuerierName = %q, want %q", opts.BaseQuerierName, "Querier")
+	}
+}
+
+func TestGenerate_EmitCombinedInterface(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","emit_combined_interface":true}`),
+		Queries: []*plugin.Query{
+			{
+				Name:            "InsertUser",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO users (name, email) VALUES (?, ?)",
+				InsertIntoTable: &plugin.Identifier{Name: "users"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("name", "varchar", true)},
+					{Column: makeColumn("email", "varchar", true)},
+				},
+			},
+			{
+				Name:            "InsertAuditLog",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO audit_log (user_id) VALUES (?)",
+				InsertIntoTable: &plugin.Identifier{Name: "audit_log"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("user_id", "bigint", true)},
+				},
+			},
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// One bulk file + one combined interface file.
+	if len(resp.Files) != 2 {
+		t.Fatalf("expected 2 files, got %d: %v", len(resp.Files), fileNames(resp.Files))
+	}
+
+	iface, ok := indexByName(resp.Files)["ext_querier.go"]
+	if !ok {
+		t.Fatalf("missing ext_querier.go; got %v", fileNames(resp.Files))
+	}
+	content := string(iface)
+	assertContains(t, content, "type ExtQuerier interface")
+	// The combined interface embeds sqlc's Querier on its own line.
+	assertContains(t, content, "\n\tQuerier\n")
+	assertContains(t, content, "BulkInsertUser(ctx context.Context, args []InsertUserParams) error")
+	assertContains(t, content, "BulkInsertAuditLog(ctx context.Context, args []int64) error")
+}
+
+// emit_interface and emit_combined_interface are independent: the combined
+// interface does not require the standalone BulkQuerier to be emitted.
+func TestGenerate_CombinedInterfaceWithoutBulkInterface(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","emit_combined_interface":true}`),
+		Queries: []*plugin.Query{
+			makeQuery("InsertUser", "users.sql"),
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	byName := indexByName(resp.Files)
+	if _, ok := byName["ext_querier.go"]; !ok {
+		t.Fatalf("missing ext_querier.go; got %v", fileNames(resp.Files))
+	}
+	if _, ok := byName["bulk_querier.go"]; ok {
+		t.Errorf("bulk_querier.go must not be emitted when emit_interface is off")
+	}
+}
+
+func TestGenerate_CombinedInterfaceImports(t *testing.T) {
+	// Single-param queries put concrete types into the inlined signatures, so
+	// the combined interface file must import the corresponding packages.
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","emit_combined_interface":true}`),
+		Queries: []*plugin.Query{
+			{
+				Name:            "InsertEvent",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO events (created_at) VALUES (?)",
+				InsertIntoTable: &plugin.Identifier{Name: "events"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("created_at", "datetime", true)}, // time.Time
+				},
+			},
+			{
+				Name:            "InsertItem",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO items (value) VALUES (?)",
+				InsertIntoTable: &plugin.Identifier{Name: "items"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("value", "varchar", false)}, // sql.NullString
+				},
+			},
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	iface := string(indexByName(resp.Files)["ext_querier.go"])
+	assertContains(t, iface, `"time"`)
+	assertContains(t, iface, `"database/sql"`)
+	assertContains(t, iface, "args []time.Time")
+	assertContains(t, iface, "args []sql.NullString")
+}
+
+// Multi-param-only queries reference the Params struct, so the combined
+// interface needs no extra imports beyond context.
+func TestGenerate_CombinedInterfaceNoSpuriousImports(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","emit_combined_interface":true}`),
+		Queries: []*plugin.Query{
+			{
+				Name:            "InsertEvent",
+				Cmd:             ":exec",
+				Text:            "INSERT INTO events (name, started_at) VALUES (?, ?)",
+				InsertIntoTable: &plugin.Identifier{Name: "events"},
+				Params: []*plugin.Parameter{
+					{Column: makeColumn("name", "varchar", true)},
+					{Column: makeColumn("started_at", "datetime", true)},
+				},
+			},
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	iface := string(indexByName(resp.Files)["ext_querier.go"])
+	assertNotContains(t, iface, `"time"`)
+	assertNotContains(t, iface, `"encoding/json"`)
+	assertNotContains(t, iface, `"database/sql"`)
+	assertContains(t, iface, "args []InsertEventParams")
+}
+
+func TestGenerate_CombinedInterfaceCustomNames(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","emit_combined_interface":true,"combined_interface_name":"FullStore","base_querier_name":"DBQuerier"}`),
+		Queries: []*plugin.Query{
+			makeQuery("InsertUser", "users.sql"),
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	iface, ok := indexByName(resp.Files)["full_store.go"]
+	if !ok {
+		t.Fatalf("missing full_store.go; got %v", fileNames(resp.Files))
+	}
+	content := string(iface)
+	assertContains(t, content, "type FullStore interface")
+	assertContains(t, content, "\n\tDBQuerier\n")
+}
+
+func TestGenerate_NoCombinedInterfaceWhenDisabled(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db"}`),
+		Queries: []*plugin.Query{
+			makeQuery("InsertUser", "users.sql"),
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := indexByName(resp.Files)["ext_querier.go"]; ok {
+		t.Errorf("ext_querier.go must not be emitted when emit_combined_interface is off")
+	}
+}
+
+// Both interface flags can be enabled together, producing two separate files.
+func TestGenerate_BothInterfaceFlags(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		PluginOptions: []byte(`{"package":"db","emit_interface":true,"emit_combined_interface":true}`),
+		Queries: []*plugin.Query{
+			makeQuery("InsertUser", "users.sql"),
+		},
+	}
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	byName := indexByName(resp.Files)
+	if _, ok := byName["bulk_querier.go"]; !ok {
+		t.Errorf("missing bulk_querier.go; got %v", fileNames(resp.Files))
+	}
+	if _, ok := byName["ext_querier.go"]; !ok {
+		t.Errorf("missing ext_querier.go; got %v", fileNames(resp.Files))
+	}
+}
+
 // ─── helpers for split tests ──────────────────────────────────────────────────
 
 func fileNames(files []*plugin.File) []string {

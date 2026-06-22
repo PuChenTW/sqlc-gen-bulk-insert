@@ -14,10 +14,12 @@ sql:
       go:
         package: "db"
         out:     "db"
+        emit_interface: true   # required so the combined ExtQuerier can embed Querier
 
     codegen:
       - plugin:  sqlc-gen-bulk-insert
         out:     "db"          # same directory so generated code shares the package
         options:
-          package:      "db"
-          out_filename: "bulk_insert.go"
+          package:                 "db"
+          out_filename:            "bulk_insert.go"
+          emit_combined_interface: true   # generate ExtQuerier (Querier + bulk methods)

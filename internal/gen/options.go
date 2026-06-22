@@ -37,6 +37,25 @@ type Options struct {
 	// InterfaceName is the name of the generated interface.
 	// Defaults to "BulkQuerier". Only used when EmitInterface is true.
 	InterfaceName string `json:"interface_name"`
+
+	// EmitCombinedInterface controls whether a combined interface file is
+	// produced. The combined interface embeds sqlc's own Querier interface
+	// (see BaseQuerierName) and inlines every generated bulk method, giving a
+	// single interface that covers the whole data-access layer. Defaults to
+	// false. It is independent of EmitInterface and does not require it.
+	//
+	// Prerequisite: sqlc-gen-go must be configured with emit_interface: true so
+	// that the embedded Querier interface exists in the same output package.
+	EmitCombinedInterface bool `json:"emit_combined_interface"`
+
+	// CombinedInterfaceName is the name of the combined interface.
+	// Defaults to "ExtQuerier". Only used when EmitCombinedInterface is true.
+	CombinedInterfaceName string `json:"combined_interface_name"`
+
+	// BaseQuerierName is the name of the sqlc-generated interface that the
+	// combined interface embeds. Defaults to "Querier" (the name sqlc-gen-go
+	// always uses). Only used when EmitCombinedInterface is true.
+	BaseQuerierName string `json:"base_querier_name"`
 }
 
 // parseOptions deserialises JSON plugin options.
@@ -44,9 +63,11 @@ type Options struct {
 // absent / empty, or "split_by" is not a recognised value.
 func parseOptions(data []byte) (*Options, error) {
 	opts := &Options{
-		OutFilename:   "bulk_insert.go",
-		SplitBy:       "single",
-		InterfaceName: "BulkQuerier",
+		OutFilename:           "bulk_insert.go",
+		SplitBy:               "single",
+		InterfaceName:         "BulkQuerier",
+		CombinedInterfaceName: "ExtQuerier",
+		BaseQuerierName:       "Querier",
 	}
 	if len(data) > 0 {
 		if err := json.Unmarshal(data, opts); err != nil {
@@ -61,6 +82,12 @@ func parseOptions(data []byte) (*Options, error) {
 	}
 	if opts.InterfaceName == "" {
 		opts.InterfaceName = "BulkQuerier"
+	}
+	if opts.CombinedInterfaceName == "" {
+		opts.CombinedInterfaceName = "ExtQuerier"
+	}
+	if opts.BaseQuerierName == "" {
+		opts.BaseQuerierName = "Querier"
 	}
 	switch opts.SplitBy {
 	case "", "single":
